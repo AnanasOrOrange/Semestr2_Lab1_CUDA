@@ -4,15 +4,15 @@
 #include <chrono>
 
 #define OUT_MATRIX
-#define BLOCK_SIZE 16
+#define BLOCK_SIZE	16
 
-static int N = 4, M = 3, P = 2;
+static int M = 4, N = 3, P = 2;
 
 #define CHECK_ERR()														
 void check() {
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
-		fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err));
+		fprintf(stderr, "CUDA error at %s:%d: %s\M", __FILE__, __LINE__, cudaGetErrorString(err));
 		system("pause");
 		exit(1);
 	}
@@ -38,11 +38,11 @@ void printMatrix(int** matrix, int rows, int cols) {
 }
 #endif
 
-void matrixMultiplicationCPU(int** A, int** B, int** C, int rowsA, int colsA, int rowsB, int colsB) {
-	for (int i = 0; i < rowsA; i++) {
-		for (int j = 0; j < colsB; j++) {
+void matrixMultiplicationCPU(int** A, int** B, int** C) {
+	for (int i = 0; i < M; i++) {
+		for (int j = 0; j < P; j++) {
 			C[i][j] = 0;
-			for (int k = 0; k < colsA; k++) {
+			for (int k = 0; k < N; k++) {
 				C[i][j] += A[i][k] * B[k][j];
 			}
 		}
@@ -50,87 +50,84 @@ void matrixMultiplicationCPU(int** A, int** B, int** C, int rowsA, int colsA, in
 }
 
 __global__
-void matrixMultiplicationGPU(int* A, int* B, int* C, int rowsA, int colsA, int rowsB, int colsB) {
+void matrixMultiplicationGPU(int* A, int* B, int* C, int M, int N, int P) {
 
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-	// (N x M)  X  (M x P)  = (N x P) 
-	int n = rowsA;
-	int m = colsA;
-	int p = colsB;
+	// (M x N)  X  (N x P)  = (M x P) 
 
-	if (row < n && col < p) {
+	if (row < M && col < P) {
 		int sum = 0;
-		for (int i = 0; i < m; i++) {
-			sum += A[row * m + i] * B[i * p + col];
+		for (int i = 0; i < N; i++) {
+			sum += A[row * N + i] * B[i * P + col];
 		}
-		C[row * p + col] = sum;
+		C[row * P + col] = sum;
 	}
 
 }
 
 __global__
-void tr_matrixMultiplicationGPU(int* A, int* B, int* C, int rowsA, int colsA, int rowsB, int colsB) {
+void tr_matrixMultiplicationGPU(int* A, int* B, int* C, int M, int N, int P) {
 
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-	// (N x M)  X  (M x P)  = (N x P) 
-	int n = rowsA;
-	int m = colsA;
-	int p = colsB;
+	// (M x N)  X  (N x P)  = (M x P) 
 
-	if (row < n && col < p) {
+	if (row < M && col < P) {
 		int sum = 0;
-		for (int i = 0; i < m; i++) {
-			sum += A[row * m + i] * B[col * m + i];
+		for (int i = 0; i < N; i++) {
+			// B[N x P] -> Transpose -> B[P x N]
+			sum += A[row * N + i] * B[col * N + i];
 		}
-		C[row * p + col] = sum;
+		C[row * P + col] = sum;
 	}
 }
 
 __global__ 
-void sh_matrixMultiplicationGPU(int* A, int* B, int* C, int m, int n, int k) {
-	__shared__ float sA[BLOCK_SIZE][BLOCK_SIZE];
-	__shared__ float sB[BLOCK_SIZE][BLOCK_SIZE];
+void sh_matrixMultiplicationGPU(int* A, int* B, int* C, int M, int N, int P) {
 
-	int bx = blockIdx.x;
-	int by = blockIdx.y;
-	int tx = threadIdx.x;
-	int ty = threadIdx.y;
+	__shared__ float shA[BLOCK_SIZE][BLOCK_SIZE];
+	__shared__ float shB[BLOCK_SIZE][BLOCK_SIZE];
 
-	int row = by * BLOCK_SIZE + ty;
-	int col = bx * BLOCK_SIZE + tx;
+	//	вместо того, чтобы постоянно обращаться к глобальной памяти
+	//	мы просто используем shared память размером с блок
 
-	float result = 0;
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-	for (int i = 0; i < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++i) {
-		if (row < m && i * BLOCK_SIZE + tx < n) {
-			sA[ty][tx] = A[row * n + i * BLOCK_SIZE + tx];
+	// (M x N)  X  (N x P)  = (M x P) 
+
+	float sum = 0.0f;
+
+	// идем по количеству блоков, нужных для умножения
+	for (int i = 0; i < (N + BLOCK_SIZE - 1) / BLOCK_SIZE; i++) {
+		if (row < M && i * BLOCK_SIZE + threadIdx.x < N) {
+			shA[threadIdx.y][threadIdx.x] = A[row * N + i * BLOCK_SIZE + threadIdx.x];
 		}
 		else {
-			sA[ty][tx] = 0;
+			shA[threadIdx.y][threadIdx.x] = 0.0f;
 		}
 
-		if (i * BLOCK_SIZE + ty < n && col < k) {
-			sB[ty][tx] = B[(i * BLOCK_SIZE + ty) * k + col];
+		if (col < P && i * BLOCK_SIZE + threadIdx.y < N) {
+			shB[threadIdx.y][threadIdx.x] = B[(i * BLOCK_SIZE + threadIdx.y) * P + col];
 		}
 		else {
-			sB[ty][tx] = 0;
+			shB[threadIdx.y][threadIdx.x] = 0.0f;
 		}
 
 		__syncthreads();
 
-		for (int j = 0; j < BLOCK_SIZE; ++j) {
-			result += sA[ty][j] * sB[j][tx];
+		for (int k = 0; k < BLOCK_SIZE; k++) {
+			sum += shA[threadIdx.y][k] * shB[k][threadIdx.x];
 		}
 
 		__syncthreads();
 	}
 
-	if (row < m && col < k) {
-		C[row * k + col] = result;
+	if (row < M && col < P) {
+		C[row * P + col] = sum;
 	}
 }
 
@@ -174,40 +171,37 @@ void transpose(int* a, int* b, int rows, int cols)
 
 int main()
 {
-	//               
-	int rowsA = N, colsA = M;
-	int rowsB = colsA, colsB = P;
 
-	std::cout << "(N x M)  X  (M x P)  = (N x P) " << std::endl;
-	std::cout << "N = " << rowsA << " M = " << colsA << " P = " << colsB << std::endl;
+	std::cout << "(M x N)  X  (N x P)  = (M x P) " << std::endl;
+	std::cout << "M = " << M << " N = " << N << " P = " << P << std::endl;
 	std::cout << std::endl;
 
-	int** A = new int* [rowsA];
-	int** B = new int* [rowsB];
+	int** A = new int* [M];
+	int** B = new int* [N];
 
-	for (int i = 0; i < rowsA; i++) {
-		A[i] = new int[colsA];
+	for (int i = 0; i < M; i++) {
+		A[i] = new int[N];
 	}
-	for (int i = 0; i < rowsB; i++) {
-		B[i] = new int[colsB];
+	for (int i = 0; i < N; i++) {
+		B[i] = new int[P];
 	}
 
-	fillByRandom(A, rowsA, colsA);
-	fillByRandom(B, rowsB, colsB);
+	fillByRandom(A, M, N);
+	fillByRandom(B, N, P);
 
 #ifdef OUT_MATRIX
 	std::cout << "Matrix A:" << std::endl;
-	printMatrix(A, rowsA, colsA);
+	printMatrix(A, M, N);
 
 	std::cout << "Matrix B:" << std::endl;
-	printMatrix(B, rowsB, colsB);
+	printMatrix(B, N, P);
 #endif
 
 	/////////////////////////////////////////
 
 	//               CPU
 
-	int rowsC = rowsA, colsC = colsB;
+	int rowsC = M, colsC = P;
 	int** C = new int* [rowsC];
 	for (int i = 0; i < rowsC; i++) {
 		C[i] = new int[colsC];
@@ -216,7 +210,7 @@ int main()
 	//          A x B = C
 
 	auto startCPU = std::chrono::steady_clock::now();
-	matrixMultiplicationCPU(A, B, C, rowsA, colsA, rowsB, colsB);
+	matrixMultiplicationCPU(A, B, C);
 	auto endCPU = std::chrono::steady_clock::now();
 
 	//                                       xD                    
@@ -237,28 +231,28 @@ int main()
 	cudaEventCreate(&stopGPU);
 	cudaEventRecord(startGPU);
 
-	int* hostA = new int[rowsA * colsA];
-	int* hostB = new int[rowsB * colsB];
+	int* hostA = new int[M * N];
+	int* hostB = new int[N * P];
 	int* hostC = new int[rowsC * colsC];
 
 	int* devA, * devB, * devC;
 
-	cudaMalloc((void**)&devA, rowsA * colsA * sizeof(int)); CHECK_ERR();
-	cudaMalloc((void**)&devB, rowsB * colsB * sizeof(int)); CHECK_ERR();
+	cudaMalloc((void**)&devA, M * N * sizeof(int)); CHECK_ERR();
+	cudaMalloc((void**)&devB, N * P * sizeof(int)); CHECK_ERR();
 	cudaMalloc((void**)&devC, rowsC * colsC * sizeof(int)); CHECK_ERR();
 
-	copyMatrix_2dTo1d(A, rowsA, colsA, hostA); CHECK_ERR();
-	copyMatrix_2dTo1d(B, rowsB, colsB, hostB); CHECK_ERR();
+	copyMatrix_2dTo1d(A, M, N, hostA); 
+	copyMatrix_2dTo1d(B, N, P, hostB);
 
-	cudaMemcpy(devA, hostA, rowsA * colsA * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
-	cudaMemcpy(devB, hostB, rowsB * colsB * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
+	cudaMemcpy(devA, hostA, M * N * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
+	cudaMemcpy(devB, hostB, N * P * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 	cudaMemcpy(devC, hostC, rowsC * colsC * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 
 
 	dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
-	dim3 dimGrid((colsC + BLOCK_SIZE - 1) / BLOCK_SIZE, (rowsC + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	dim3 dimGrid((rowsC + BLOCK_SIZE - 1) / BLOCK_SIZE, (colsC + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
-	matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, rowsA, colsA, rowsB, colsB); CHECK_ERR();
+	matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, M, N, P); CHECK_ERR();
 
 	cudaMemcpy(hostC, devC, rowsC * colsC * sizeof(int), cudaMemcpyDeviceToHost); CHECK_ERR();
 	copyMatrix_1dTo2d(C, rowsC, colsC, hostC);
@@ -280,17 +274,17 @@ int main()
 
 	cudaEventRecord(startGPU);
 
-	copyMatrix_2dTo1d(A, rowsA, colsA, hostA); CHECK_ERR();
-	copyMatrix_2dTo1d(B, rowsB, colsB, hostB); CHECK_ERR();
+	copyMatrix_2dTo1d(A, M, N, hostA); 
+	copyMatrix_2dTo1d(B, N, P, hostB); 
 
-	int* tr_hostB = new int[rowsB * colsB];
-	transpose(hostB, tr_hostB, rowsB, colsB);
+	int* tr_hostB = new int[N * P];
+	transpose(hostB, tr_hostB, N, P);
 
-	cudaMemcpy(devA, hostA, rowsA * colsA * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
-	cudaMemcpy(devB, tr_hostB, rowsB * colsB * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
+	cudaMemcpy(devA, hostA, M * N * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
+	cudaMemcpy(devB, tr_hostB, N * P * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 	cudaMemcpy(devC, hostC, rowsC * colsC * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 
-	tr_matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, rowsA, colsA, rowsB, colsB); CHECK_ERR();
+	tr_matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, M, N, P); CHECK_ERR();
 
 	cudaMemcpy(hostC, devC, rowsC * colsC * sizeof(int), cudaMemcpyDeviceToHost); CHECK_ERR();
 	copyMatrix_1dTo2d(C, rowsC, colsC, hostC);
@@ -312,19 +306,15 @@ int main()
 
 	cudaEventRecord(startGPU);
 
-	copyMatrix_2dTo1d(A, rowsA, colsA, hostA); CHECK_ERR();
-	copyMatrix_2dTo1d(B, rowsB, colsB, hostB); CHECK_ERR();
+	copyMatrix_2dTo1d(A, M, N, hostA);
+	copyMatrix_2dTo1d(B, N, P, hostB); 
 
-	cudaMemcpy(devA, hostA, rowsA * colsA * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
-	cudaMemcpy(devB, hostB, rowsB * colsB * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
-
-	for (int i = 0; i < rowsC * colsC; i++) {
-		hostC[i] = 0;
-	}
+	cudaMemcpy(devA, hostA, M * N * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
+	cudaMemcpy(devB, hostB, N * P * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 
 	cudaMemcpy(devC, hostC, rowsC * colsC * sizeof(int), cudaMemcpyHostToDevice); CHECK_ERR();
 
-	sh_matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, rowsA, colsA, colsB);
+	sh_matrixMultiplicationGPU << < dimGrid, dimBlock >> > (devA, devB, devC, M, N, P);
 
 	cudaMemcpy(hostC, devC, rowsC * colsC * sizeof(int), cudaMemcpyDeviceToHost); CHECK_ERR();
 	copyMatrix_1dTo2d(C, rowsC, colsC, hostC);
@@ -344,10 +334,10 @@ int main()
 	cudaEventDestroy(startGPU);
 	cudaEventDestroy(stopGPU);
 
-	for (int i = 0; i < rowsA; i++) {
+	for (int i = 0; i < M; i++) {
 		delete[] A[i];
 	}
-	for (int i = 0; i < rowsB; i++) {
+	for (int i = 0; i < N; i++) {
 		delete[] B[i];
 	}
 	for (int i = 0; i < rowsC; i++) {
