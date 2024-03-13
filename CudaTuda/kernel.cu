@@ -3,10 +3,10 @@
 #include <iostream>
 #include <chrono>
 
-#define OUT_MATRIX
-#define BLOCK_SIZE	16
+//#define OUT_MATRIX
+#define BLOCK_SIZE	64
 
-static int M = 4, N = 3, P = 2;
+static int M = 160, N = 160, P = 160;
 
 #define CHECK_ERR()														
 void check() {
@@ -44,6 +44,17 @@ void matrixMultiplicationCPU(int** A, int** B, int** C) {
 			C[i][j] = 0;
 			for (int k = 0; k < N; k++) {
 				C[i][j] += A[i][k] * B[k][j];
+			}
+		}
+	}
+}
+
+void tr_matrixMultiplicationCPU(int** A, int** B, int** C) {
+	for (int i = 0; i < N; i++) {
+		for (int j = 0; j < P; j++) {
+			C[i][j] = 0;
+			for (int k = 0; k < N; k++) {
+				C[i][j] += A[i][k] * B[i][k];
 			}
 		}
 	}
@@ -166,6 +177,17 @@ void transpose(int* a, int* b, int rows, int cols)
 	{
 		for (int j = 0; j < cols; j++)
 			b[j * rows + i] = a[i * cols + j];
+		
+	}
+}
+
+void tr2D(int** a, int** b) {
+	for (int i = 0; i < N; i++)
+	{
+		for (int j = 0; j < P; j++)
+			if (i < j) {
+				b[j][i] = a[i][j];
+			}
 	}
 }
 
@@ -214,7 +236,32 @@ int main()
 	auto endCPU = std::chrono::steady_clock::now();
 
 	//                                       xD                    
-	std::cout << "CPU matrix multiplication time = " << std::chrono::duration_cast<std::chrono::milliseconds>(endCPU - startCPU).count() << " millisec, (1e-3 sec)" << std::endl;
+	std::cout << "CPU matrix multiplication time\t\t\t\t= " << std::chrono::duration_cast<std::chrono::milliseconds>(endCPU - startCPU).count() << "\t\tmillisec, (1e-3 sec)" << std::endl;
+
+#ifdef OUT_MATRIX
+	std::cout << "A x B = Matrix C:" << std::endl;
+	printMatrix(C, rowsC, colsC);
+#endif
+
+	//               CPU + Transpose
+
+
+	//          A x B = C
+
+	int** trB = new int* [N];
+
+	for (int i = 0; i < N; i++) {
+		trB[i] = new int[P];
+	}
+
+	startCPU = std::chrono::steady_clock::now();
+	tr2D(B, trB);
+
+	tr_matrixMultiplicationCPU(A, trB, C);
+	endCPU = std::chrono::steady_clock::now();
+
+	//                                       xD                    
+	std::cout << "CPU matrix multiplication time with Transpose\t\t= " << std::chrono::duration_cast<std::chrono::milliseconds>(endCPU - startCPU).count() << "\t\tmillisec, (1e-3 sec)" << std::endl;
 
 #ifdef OUT_MATRIX
 	std::cout << "A x B = Matrix C:" << std::endl;
@@ -262,7 +309,7 @@ int main()
 	float timeCUDA = 0;
 	cudaEventElapsedTime(&timeCUDA, startGPU, stopGPU);
 
-	std::cout << "GPU matrix multiplication time = " << timeCUDA << " millisec, (1e-3 sec)" << std::endl;
+	std::cout << "GPU matrix multiplication time\t\t\t\t= " << timeCUDA << "\tmillisec, (1e-3 sec)" << std::endl;
 #ifdef OUT_MATRIX
 	std::cout << "A x B = Matrix C:" << std::endl;
 	printMatrix(C, rowsC, colsC);
@@ -293,7 +340,7 @@ int main()
 	cudaEventSynchronize(stopGPU);
 	cudaEventElapsedTime(&timeCUDA, startGPU, stopGPU);
 
-	std::cout << "GPU matrix multiplication time with Transpons = " << timeCUDA << " millisec, (1e-3 sec)" << std::endl;
+	std::cout << "GPU matrix multiplication time with Transpons\t\t= " << timeCUDA << "\tmillisec, (1e-3 sec)" << std::endl;
 #ifdef OUT_MATRIX
 	std::cout << "A x B = Matrix C:" << std::endl;
 	printMatrix(C, rowsC, colsC);
@@ -323,7 +370,7 @@ int main()
 	cudaEventSynchronize(stopGPU);
 	cudaEventElapsedTime(&timeCUDA, startGPU, stopGPU);
 
-	std::cout << "GPU matrix multiplication time with Shared memory = " << timeCUDA << " millisec, (1e-3 sec)" << std::endl;
+	std::cout << "GPU matrix multiplication time with Shared memory\t= " << timeCUDA << "\tmillisec, (1e-3 sec)" << std::endl;
 #ifdef OUT_MATRIX
 	std::cout << "A x B = Matrix C:" << std::endl;
 	printMatrix(C, rowsC, colsC);
